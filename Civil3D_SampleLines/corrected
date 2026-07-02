@@ -1,0 +1,524 @@
+using Autodesk.AutoCAD.ApplicationServices;
+using Autodesk.AutoCAD.DatabaseServices;
+using Autodesk.AutoCAD.EditorInput;
+using Autodesk.AutoCAD.GraphicsInterface;
+using Autodesk.AutoCAD.Runtime;
+using Autodesk.Civil.DatabaseServices;
+using Autodesk.AutoCAD.Geometry;
+using System;
+using System.Collections.Generic;
+using System.IO;
+
+[assembly: CommandClass(typeof(Civil3D_SampleLines.Commands))]
+
+namespace Civil3D_SampleLines
+{
+    public class Commands
+    {
+        // Prefix used for all Sample Line names
+        private const string SampleLinePrefix = "SL_";
+
+        // ============================================================
+        // ALIGNINFO
+        // Displays information about the selected Alignment.
+        // ============================================================
+        [CommandMethod("ALIGNINFO")]
+        public void AlignInfo()
+        {
+            Document doc = Application.DocumentManager.MdiActiveDocument;
+            Editor ed = doc.Editor;
+            Database db = doc.Database;
+
+            PromptEntityOptions peo =
+                new PromptEntityOptions("\nSelect Alignment: ");
+
+            peo.SetRejectMessage("\nPlease select a Civil 3D Alignment.");
+            peo.AddAllowedClass(typeof(Alignment), true);
+
+            PromptEntityResult per = ed.GetEntity(peo);
+
+            if (per.Status != PromptStatus.OK)
+                return;
+
+            using (Transaction tr = db.TransactionManager.StartTransaction())
+            {
+                Alignment align =
+                    tr.GetObject(per.ObjectId, OpenMode.ForRead) as Alignment;
+
+                ed.WriteMessage(
+                    $"\nName   : {align.Name}" +
+                    $"\nStart  : {align.StartingStation:F2}" +
+                    $"\nEnd    : {align.EndingStation:F2}" +
+                    $"\nLength : {align.Length:F2}");
+
+                tr.Commit();
+            }
+        }
+
+        // ============================================================
+        // CREATEGROUP
+        // Creates a Sample Line Group.
+        // Creates one Sample Line at the specified station.
+        // ============================================================
+        [CommandMethod("CREATEGROUP")]
+        public void CreateGroup()
+        {
+            Document doc = Application.DocumentManager.MdiActiveDocument;
+            Editor ed = doc.Editor;
+            Database db = doc.Database;
+
+            PromptEntityOptions peo =
+                new PromptEntityOptions("\nSelect Alignment: ");
+
+            peo.SetRejectMessage("\nPlease select a Civil 3D Alignment.");
+            peo.AddAllowedClass(typeof(Alignment), true);
+
+            PromptEntityResult per = ed.GetEntity(peo);
+
+            if (per.Status != PromptStatus.OK)
+                return;
+
+            PromptDoubleOptions pdo =
+                new PromptDoubleOptions("\nEnter station: ");
+
+            pdo.AllowNegative = false;
+            pdo.AllowZero = true;
+
+            PromptDoubleResult pdr = ed.GetDouble(pdo);
+
+            if (pdr.Status != PromptStatus.OK)
+                return;
+
+            double station = pdr.Value;
+
+            using (Transaction tr = db.TransactionManager.StartTransaction())
+            {
+                Alignment align =
+                    tr.GetObject(per.ObjectId, OpenMode.ForRead) as Alignment;
+
+                ObjectId groupId =
+                    SampleLineGroup.Create(
+                        "My First Group",
+                        align.ObjectId);
+
+                ObjectId sampleLineId =
+                    SampleLine.Create(
+                        "SL_" + station.ToString("0.00"),
+                        groupId,
+                        station);
+
+                ed.WriteMessage("\nSample Line created successfully.");
+
+                tr.Commit();
+            }
+        }
+
+        // ============================================================
+        // FINDGROUP
+        // Reads a CSV file and displays every valid station.
+        // (For now, it does NOT create Sample Lines.)
+        // ============================================================
+        [CommandMethod("FINDGROUP")]
+        public void FindGroup()
+        {
+            Document doc = Application.DocumentManager.MdiActiveDocument;
+            Editor ed = doc.Editor;
+            Database db = doc.Database;
+
+            PromptOpenFileOptions pfo =
+                new PromptOpenFileOptions("\nSelect CSV file:");
+
+            pfo.Filter = "CSV Files (*.csv)|*.csv";
+
+            PromptFileNameResult pfr =
+                ed.GetFileNameForOpen(pfo);
+
+            if (pfr.Status != PromptStatus.OK)
+                return;
+
+            string filePath = pfr.StringResult;
+            string[] lines = File.ReadAllLines(filePath);
+
+            foreach (string line in lines)
+            {
+                if (double.TryParse(line, out double station))
+                {
+                    ed.WriteMessage($"\nStation = {station}");
+                }
+                else
+                {
+                    ed.WriteMessage(
+                        $"\nWarning : '{line}' is not a valid station.");
+                }
+            }
+        }
+
+        // =======================================================
+        // IMPORTCSV
+        // Imports stations from a CSV file and creates Sample Lines.
+        // Lets the user pick an existing Sample Line Group or
+        // create a new one (auto-uniquified if the name collides).
+        // Existing stations are skipped.
+        // =======================================================
+        [CommandMethod("IMPORTCSV")]
+        public void ImportCsv()
+        {
+            Document doc = Application.DocumentManager.MdiActiveDocument;
+            Editor ed = doc.Editor;
+            Database db = doc.Database;
+
+            PromptEntityOptions peo =
+                new PromptEntityOptions("\nSelect Alignment:");
+
+            peo.SetRejectMessage("\nPlease select a Civil 3D Alignment.");
+            peo.AddAllowedClass(typeof(Alignment), true);
+
+            PromptEntityResult per = ed.GetEntity(peo);
+
+            if (per.Status != PromptStatus.OK)
+                return;
+
+            PromptOpenFileOptions pfo =
+                new PromptOpenFileOptions("\nSelect CSV file:");
+
+            pfo.Filter = "CSV Files (*.csv)|*.csv";
+
+            PromptFileNameResult pfr =
+                ed.GetFileNameForOpen(pfo);
+
+            if (pfr.Status != PromptStatus.OK)
+                return;
+
+            string filePath = pfr.StringResult;
+
+            string groupNameDefault =
+                Path.GetFileNameWithoutExtension(filePath);
+
+            // Ask for the "left" sample line width
+            PromptDoubleOptions pdoLeft =
+                new PromptDoubleOptions(
+                    "\nEnter left sample line width:(10)");
+
+            pdoLeft.DefaultValue = 10.0;
+            pdoLeft.AllowNegative = false;
+            pdoLeft.AllowZero = false;
+
+            PromptDoubleResult pdrLeft =
+                ed.GetDouble(pdoLeft);
+
+            if (pdrLeft.Status != PromptStatus.OK)
+                return;
+
+            double leftWidth = pdrLeft.Value;
+
+            // Ask for the "right" sample line width
+            PromptDoubleOptions pdoRight =
+                new PromptDoubleOptions(
+                    "\nEnter right sample line width:(10)");
+
+            pdoRight.DefaultValue = 10.0;
+            pdoRight.AllowNegative = false;
+            pdoRight.AllowZero = false;
+
+            PromptDoubleResult pdrRight =
+                ed.GetDouble(pdoRight);
+
+            if (pdrRight.Status != PromptStatus.OK)
+                return;
+
+            double rightWidth = pdrRight.Value;
+
+            List<double> stations = ReadStationsFromCsv(filePath);
+
+            using (Transaction tr = db.TransactionManager.StartTransaction())
+            {
+                Alignment align =
+                    tr.GetObject(per.ObjectId, OpenMode.ForRead) as Alignment;
+
+                ObjectId groupId;
+
+                try
+                {
+                    groupId = SelectOrCreateSampleLineGroup(
+                        align,
+                        tr,
+                        ed,
+                        groupNameDefault);
+                }
+                catch (Exception ex)
+                {
+                    ed.WriteMessage($"\n{ex.Message}");
+                    tr.Commit();
+                    return;
+                }
+
+                HashSet<double> existingStations =
+                    GetExistingStations(groupId, tr);
+
+                int createdCount =
+                    CreateSampleLines(
+                        stations,
+                        groupId,
+                        existingStations,
+                        leftWidth,
+                        rightWidth,
+                        align,
+                        tr,
+                        ed);
+
+                ed.WriteMessage("\nImport complete.");
+                ed.WriteMessage($"\nCSV stations : {stations.Count}");
+                ed.WriteMessage($"\nCreated      : {createdCount}");
+                ed.WriteMessage($"\nSkipped      : {stations.Count - createdCount}");
+
+                tr.Commit();
+            }
+
+            // Force a screen refresh so any moved geometry shows immediately
+            doc.Editor.Regen();
+        }
+
+        // ============================================================
+        // READ STATIONS FROM CSV
+        // ============================================================
+        private List<double> ReadStationsFromCsv(string filePath)
+        {
+            List<double> stations = new List<double>();
+            string[] lines = File.ReadAllLines(filePath);
+
+            foreach (string line in lines)
+            {
+                if (double.TryParse(line, out double station))
+                {
+                    stations.Add(station);
+                }
+            }
+
+            return stations;
+        }
+
+        // ============================================================
+        // SELECT OR CREATE SAMPLE LINE GROUP
+        // Lets the user choose an existing group (indices always match
+        // what is displayed) or create a brand new one. If "New" is
+        // chosen and the name collides with an existing group, the
+        // name is auto-uniquified (Name, Name_1, Name_2, ...) instead
+        // of silently reusing the old group.
+        // ============================================================
+        private ObjectId SelectOrCreateSampleLineGroup(
+            Alignment align,
+            Transaction tr,
+            Editor ed,
+            string defaultName)
+        {
+            ObjectIdCollection groups = align.GetSampleLineGroupIds();
+
+            // Build a list of only the valid (non-null, resolvable) groups
+            List<ObjectId> validGroups = new List<ObjectId>();
+
+            foreach (ObjectId id in groups)
+            {
+                if (id.IsNull)
+                    continue;
+
+                SampleLineGroup g = tr.GetObject(id, OpenMode.ForRead) as SampleLineGroup;
+
+                if (g == null)
+                    continue;
+
+                validGroups.Add(id);
+            }
+
+            if (validGroups.Count > 0)
+            {
+                PromptKeywordOptions pko =
+                    new PromptKeywordOptions(
+                        "\nUse existing Sample Line Group or create a new one?");
+
+                pko.Keywords.Add("Existing");
+                pko.Keywords.Add("New");
+                pko.AllowNone = false;
+
+                PromptResult pr = ed.GetKeywords(pko);
+
+                if (pr.Status != PromptStatus.OK)
+                    throw new Exception("Command cancelled.");
+
+                if (pr.StringResult == "Existing")
+                {
+                    ed.WriteMessage("\nAvailable Sample Line Groups:");
+
+                    for (int i = 0; i < validGroups.Count; i++)
+                    {
+                        SampleLineGroup g =
+                            tr.GetObject(validGroups[i], OpenMode.ForRead) as SampleLineGroup;
+
+                        ed.WriteMessage($"\n{i + 1} - {g.Name}");
+                    }
+
+                    PromptIntegerOptions pio =
+                        new PromptIntegerOptions("\nSelect group number:");
+
+                    pio.LowerLimit = 1;
+                    pio.UpperLimit = validGroups.Count;
+
+                    PromptIntegerResult pir = ed.GetInteger(pio);
+
+                    if (pir.Status != PromptStatus.OK)
+                        throw new Exception("Command cancelled.");
+
+                    // Indices now always line up with what was displayed
+                    return validGroups[pir.Value - 1];
+                }
+            }
+
+            // ---- Creating a NEW group ----
+            PromptStringOptions pso =
+                new PromptStringOptions(
+                    $"\nEnter new Sample Line Group name:({defaultName})");
+
+            pso.AllowSpaces = true;
+            pso.DefaultValue = defaultName;
+            pso.UseDefaultValue = true;
+
+            PromptResult psr = ed.GetString(pso);
+
+            if (psr.Status != PromptStatus.OK)
+                throw new Exception("Command cancelled.");
+
+            string requestedName =
+                string.IsNullOrWhiteSpace(psr.StringResult)
+                    ? defaultName
+                    : psr.StringResult;
+
+            // Auto-uniquify against existing group names instead of
+            // silently reusing an existing group with the same name.
+            string finalName = requestedName;
+            int suffix = 1;
+            bool exists;
+
+            do
+            {
+                exists = false;
+
+                foreach (ObjectId id in validGroups)
+                {
+                    SampleLineGroup g =
+                        tr.GetObject(id, OpenMode.ForRead) as SampleLineGroup;
+
+                    if (g.Name.Equals(finalName, StringComparison.OrdinalIgnoreCase))
+                    {
+                        exists = true;
+                        finalName = $"{requestedName}_{suffix}";
+                        suffix++;
+                        break;
+                    }
+                }
+            }
+            while (exists);
+
+            if (finalName != requestedName)
+            {
+                ed.WriteMessage(
+                    $"\nA group named '{requestedName}' already exists. " +
+                    $"Creating '{finalName}' instead.");
+            }
+
+            ed.WriteMessage($"\nCreating group: {finalName}");
+
+            return SampleLineGroup.Create(finalName, align.ObjectId);
+        }
+
+        // ============================================================
+        // CREATE SAMPLE LINES
+        // Creates only the stations that do not already exist, then
+        // attempts to move each Sample Line's Left/Right vertices to
+        // the requested offsets. Diagnostic messages are written so
+        // you can confirm whether the vertex edits actually stick.
+        // ============================================================
+        private int CreateSampleLines(
+            List<double> stations,
+            ObjectId groupId,
+            HashSet<double> existingStations,
+            double leftWidth,
+            double rightWidth,
+            Alignment align,
+            Transaction tr,
+            Editor ed)
+        {
+            int createdCount = 0;
+
+            foreach (double station in stations)
+            {
+                if (existingStations.Contains(station))
+                    continue;
+
+                ObjectId sampleLineId = SampleLine.Create(
+                    SampleLinePrefix + station.ToString("0.00"),
+                    groupId,
+                    station);
+
+                SampleLine sl =
+                    tr.GetObject(sampleLineId, OpenMode.ForWrite) as SampleLine;
+
+                foreach (SampleLineVertex vertex in sl.Vertices)
+                {
+                    // Diagnostic: confirm Side / current Location BEFORE editing
+                    ed.WriteMessage(
+                        $"\n[DEBUG] Station {station} - Vertex Side={vertex.Side}, " +
+                        $"OffsetIndex={vertex.OffsetIndex}, LocBefore={vertex.Location}");
+
+                    double easting = 0.0;
+                    double northing = 0.0;
+
+                    if (vertex.Side == SampleLineVertexSideType.Left)
+                    {
+                        align.PointLocation(station, -leftWidth, ref easting, ref northing);
+                        vertex.Location = new Point3d(easting, northing, 0.0);
+                    }
+                    else if (vertex.Side == SampleLineVertexSideType.Right)
+                    {
+                        align.PointLocation(station, rightWidth, ref easting, ref northing);
+                        vertex.Location = new Point3d(easting, northing, 0.0);
+                    }
+
+                    // Diagnostic: confirm the value actually took, in the
+                    // same transaction, right after the assignment
+                    ed.WriteMessage($"\n[DEBUG] LocAfter={vertex.Location}");
+                }
+
+                createdCount++;
+            }
+
+            return createdCount;
+        }
+
+        // =======================================================
+        // GETEXISTINGSTATIONS
+        // Reads all Sample Lines in the group and returns
+        // their stations.
+        // =======================================================
+        private HashSet<double> GetExistingStations(
+            ObjectId groupId,
+            Transaction tr)
+        {
+            HashSet<double> existingStations = new HashSet<double>();
+
+            SampleLineGroup group =
+                tr.GetObject(groupId, OpenMode.ForRead) as SampleLineGroup;
+
+            ObjectIdCollection sampleLineIds =
+                group.GetSampleLineIds();
+
+            foreach (ObjectId sampleLineId in sampleLineIds)
+            {
+                SampleLine sampleLine =
+                    tr.GetObject(sampleLineId, OpenMode.ForRead) as SampleLine;
+
+                existingStations.Add(sampleLine.Station);
+            }
+
+            return existingStations;
+        }
+    }
+}
